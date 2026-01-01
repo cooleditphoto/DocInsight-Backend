@@ -1,0 +1,120 @@
+version: '3.8'
+
+services:
+  # 1. 消息队列：Redpanda (Kafka 替代品)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: docinsight-redpanda
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 512M
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+    networks:
+      default:
+        aliases:
+          - redpanda
+
+  # 2. 向量数据库：PostgreSQL + pgvector
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: docinsight-db
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=myuser
+      - POSTGRES_PASSWORD=mypassword
+      - POSTGRES_DB=resume_rag
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myuser -d resume_rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      default:
+        aliases:
+          - db
+
+  # 3. 后端 API：FastAPI
+  backend:
+    build: .
+    container_name: docinsight-backend
+    volumes:
+      - .:/app
+      - ./data:/app/app/data  # 将本地的 data 文件夹映射到容器内存放 PDF 的地方
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_URL=postgresql://myuser:mypassword@db:5432/resume_rag
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+
+  # 4. 对象存储：MinIO
+  minio:
+    image: minio/minio
+    container_name: docinsight-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password123
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./minio_data:/data
+
+  # 5. 工作流调度：Airflow
+  airflow:
+    image: apache/airflow:2.7.1-python3.10
+    container_name: docinsight-airflow
+    env_file: .env
+    user: "${AIRFLOW_UID:-1000}:0"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - .:/opt/airflow/app_code
+      - ./temp:/opt/airflow/data/incoming
+    environment:
+      - _PIP_ADDITIONAL_DEPENDENCIES=pymupdf langchain-text-splitters openai pgvector pydantic-settings aiokafka
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://myuser:mypassword@db:5432/resume_rag
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://myuser:mypassword@db:5432/resume_rag
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - DATABASE_URL=postgresql://myuser:mypassword@db:5432/resume_rag
+    command: standalone
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: python -m app.logic.worker
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql://myuser:mypassword@db:5432/resume_rag
+      - KAFKA_BOOTSTRAP_SERVERS=redpanda:9092
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redpanda
+      - db
+
+# 核心：将所有容器统一到一个名为 rag-network 的默认网络中
+networks:
+  default:
+    name: rag-network

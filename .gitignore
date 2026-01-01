@@ -1,0 +1,23 @@
+# 忽略环境变量
+.env
+
+# 忽略容器持久化数据（重要！）
+minio_data/
+postgres_data/
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+
+# 忽略简历文件和临时文件
+data/*
+temp/*
+# 排除 .gitkeep，让 Git 保留文件夹结构但不存具体简历
+!data/.gitkeep
+!temp/.gitkeep
+
+venv/
+.venv/
+
+# 其他
+.DS_Store
